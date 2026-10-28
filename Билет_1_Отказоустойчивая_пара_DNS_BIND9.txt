@@ -1,0 +1,160 @@
+Билет № 1. Отказоустойчивая пара DNS (BIND9) —
+по ЛР «Отказоустойчивая пара DNS»
+ns1 (Primary) 192.168.122.55, ns2 (Secondary) 192.168.122.25, клиент
+192.168.122.246, зона lab1.org. Все команды от root (sudo -i). Имя подключения
+смотреть: nmcli con show.
+1. Установка и сеть (на обоих серверах)
+dnf install bind bind-utils
+systemctl enable named
+ls -la /var/named/ # проверить имена named.ca, named.localhost, named.loopback
+
+# ns1 (на ns2 то же самое, но адрес .25 и имя ns2.lab1.org)
+nmcli con mod "Проводное подключение 1" ipv4.addresses "192.168.122.55/24"
+nmcli con mod "Проводное подключение 1" ipv4.gateway "192.168.122.1"
+nmcli con mod "Проводное подключение 1" ipv4.dns "192.168.122.55"
+nmcli con mod "Проводное подключение 1" ipv4.method manual
+nmcli con down "Проводное подключение 1"; nmcli con up "Проводное подключение 1"
+hostnamectl set-hostname ns1.lab1.org
+echo "192.168.122.55 ns1.lab1.org ns1" >> /etc/hosts
+echo "192.168.122.25 ns2.lab1.org ns2" >> /etc/hosts
+2. TSIG-ключ (на ns1)
+rndc-confgen -a -c /etc/named.transfer.key -k transfer-key -A hmac-sha256
+chown root:named /etc/named.transfer.key
+chmod 640 /etc/named.transfer.key
+cat /etc/named.transfer.key
+3. ns1: vim /etc/named.conf
+options {
+    listen-on port 53 { any; };
+    listen-on-v6 port 53 { none; };
+    directory "/var/named";
+    dump-file "/var/named/data/cache_dump.db";
+    statistics-file "/var/named/data/named_stats.txt";
+    memstatistics-file "/var/named/data/named_mem_stats.txt";
+    allow-query { any; };
+    allow-recursion { 192.168.122.0/24; };
+    allow-transfer { key "transfer-key"; 192.168.122.25; };
+    notify yes;
+    also-notify { 192.168.122.25; };
+    dnssec-validation no;
+    version "DNS Server";
+};
+include "/etc/named.transfer.key";
+
+zone "." IN { type hint; file "named.ca"; };
+zone "localhost" IN { type master; file "named.localhost"; allow-update { none; }; };
+zone "127.in-addr.arpa" IN { type master; file "named.loopback"; allow-update { none; }; };
+
+zone "lab1.org" IN {
+    type master;
+    file "lab1.org.zone";
+    allow-transfer { key "transfer-key"; 192.168.122.25; };
+    allow-update { none; };
+};
+zone "122.168.192.in-addr.arpa" IN {
+    type master;
+    file "192.168.122.zone";
+    allow-transfer { key "transfer-key"; 192.168.122.25; };
+    allow-update { none; };
+};
+logging { channel default_debug { file "data/named.run"; severity dynamic; }; };
+4. ns1: файлы зон
+vim /var/named/lab1.org.zone
+$TTL 86400
+@ IN SOA ns1.lab1.org. admin.lab1.org. (
+    2024012002 ; Serial
+    3600 ; Refresh
+    1800 ; Retry
+    604800 ; Expire
+    86400 ) ; Minimum TTL
+    IN NS ns1.lab1.org.
+    IN NS ns2.lab1.org.
+@ IN A 192.168.122.55
+ns1 IN A 192.168.122.55
+ns2 IN A 192.168.122.25
+www IN A 192.168.122.50
+ftp IN A 192.168.122.51
+mail IN A 192.168.122.52
+test IN A 192.168.122.150
+web IN CNAME www
+files IN CNAME ftp
+@ IN MX 10 mail.lab1.org.
+
+vim /var/named/192.168.122.zone
+$TTL 86400
+@ IN SOA ns1.lab1.org. admin.lab1.org. (
+    2024012001 3600 1800 604800 86400 )
+    IN NS ns1.lab1.org.
+    IN NS ns2.lab1.org.
+55 IN PTR ns1.lab1.org.
+25 IN PTR ns2.lab1.org.
+50 IN PTR www.lab1.org.
+150 IN PTR test.lab1.org.
+
+chown named:named /var/named/lab1.org.zone /var/named/192.168.122.zone
+named-checkconf -z /etc/named.conf
+named-checkzone lab1.org /var/named/lab1.org.zone
+named-checkzone 122.168.192.in-addr.arpa /var/named/192.168.122.zone
+systemctl restart named; systemctl enable named; systemctl status named
+firewall-cmd --permanent --add-service=dns; firewall-cmd --reload
+5. Ключ на ns2
+# ns1:
+scp /etc/named.transfer.key user@192.168.122.25:/tmp/
+# ns2:
+mv /tmp/named.transfer.key /etc/named.transfer.key
+chown root:named /etc/named.transfer.key
+chmod 640 /etc/named.transfer.key
+restorecon -v /etc/named.transfer.key # user_tmp_t -> etc_t, иначе named не прочитает
+6. ns2: vim /etc/named.conf
+options — как на ns1, НО: allow-transfer { none; }; и БЕЗ notify / also-notify
+include "/etc/named.transfer.key";
+zone "." / "localhost" / "127.in-addr.arpa" — как на ns1
+
+zone "lab1.org" IN {
+    type slave;
+    file "slaves/lab1.org.zone";
+    masters { 192.168.122.55 key "transfer-key"; };
+    allow-transfer { none; };
+};
+zone "122.168.192.in-addr.arpa" IN {
+    type slave;
+    file "slaves/192.168.122.zone";
+    masters { 192.168.122.55 key "transfer-key"; };
+    allow-transfer { none; };
+};
+logging { channel default_debug { file "data/named.run"; severity dynamic; }; };
+named-checkconf -z /etc/named.conf
+mkdir -p /var/named/slaves; chown named:named /var/named/slaves
+systemctl restart named; systemctl enable named; systemctl status named # "transfer ... TSIG transfer-key"
+firewall-cmd --permanent --add-service=dns; firewall-cmd --reload
+ls -la /var/named/slaves/
+named-compilezone -f raw -F text -o - lab1.org /var/named/slaves/lab1.org.zone
+7. Проверки
+# 1) dig к обоим серверам (serial должен совпадать)
+dig @192.168.122.55 lab1.org SOA +short
+dig @192.168.122.25 lab1.org SOA +short
+dig @192.168.122.25 www.lab1.org +short
+dig @192.168.122.25 -x 192.168.122.55 +short
+# 2) nslookup / host
+nslookup www.lab1.org 192.168.122.25
+host www.lab1.org 192.168.122.55
+# 3) синхронизация: на ns1 добавить "newhost IN A 192.168.122.200", serial -> 2024012003
+vim /var/named/lab1.org.zone; systemctl reload named
+dig @192.168.122.25 newhost.lab1.org +short # 192.168.122.200
+# 4) защита трансфера
+dig @192.168.122.55 lab1.org AXFR # Transfer failed (без ключа)
+rndc retransfer lab1.org # на ns2 — с ключом, ок
+tail /var/named/data/named.run; rndc status
+8. Клиент и отказ Primary
+vim /etc/resolv.conf
+nameserver 192.168.122.55
+nameserver 192.168.122.25
+options timeout:2 attempts:1
+
+dig www.lab1.org +short; nslookup www.lab1.org; ping -c 3 ns2.lab1.org
+
+systemctl stop named # на ns1
+dig @192.168.122.55 lab1.org SOA +short # connection refused
+dig @192.168.122.25 www.lab1.org +short # 192.168.122.50 — ns2 отвечает
+dig www.lab1.org +short # через резолвер — ответ от ns2
+nslookup www.lab1.org; host test.lab1.org
+systemctl start named # на ns1 — вернуть

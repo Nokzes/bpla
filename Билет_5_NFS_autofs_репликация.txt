@@ -1,0 +1,93 @@
+Билет № 5. NFS + autofs + репликация
+rsync/inotifywait — по ЛР (Astra Linux SE
+1.8)
+Server-A 192.168.122.111, Server-B 192.168.122.2, пользователь
+administrator. На РЕД ОС вместо apt — dnf, пакет nfs-utils, служба
+nfs-server.
+1. Server-A и Server-B (одинаково, свои адреса)
+sudo nmtui # enp1s0 → IPv4 Вручную: 192.168.122.111/24, шлюз .1, DNS 8.8.8.8
+sudo nmcli connection up enp1s0
+sudo nano /etc/apt/sources.list # закомментировать строку cdrom
+sudo apt update
+sudo apt install nfs-kernel-server nfs-common autofs rsync inotify-tools
+
+sudo mkdir -p /srv/nfs/shared
+sudo chmod 777 /srv/nfs/shared
+sudo nano /etc/exports
+/srv/nfs/shared 192.168.122.0/24(rw,sync,root_squash,no_subtree_check)
+
+sudo nano /etc/systemd/system/multi-user.target.wants/nfs-server.service
+# в конец секции [Unit]:
+Requires=rpcbind.service
+After=rpcbind.service
+
+sudo systemctl daemon-reload
+sudo exportfs -ra
+sudo systemctl restart nfs-kernel-server
+sudo systemctl enable nfs-kernel-server
+sudo showmount -e localhost # /srv/nfs/shared
+2. Клиент: autofs (прямая карта)
+sudo apt install nfs-common autofs
+sudo mkdir -p /mnt/nfs
+sudo nano /etc/auto.master
+/- /etc/auto.nfs
+
+sudo nano /etc/auto.nfs
+/mnt/nfs/shared -fstype=nfs,rw,soft,intr 192.168.122.111:/srv/nfs/shared
+/mnt/nfs/backup -fstype=nfs,rw,soft,intr 192.168.122.2:/srv/nfs/shared
+
+sudo systemctl daemon-reload
+sudo systemctl restart autofs
+sudo systemctl enable autofs
+ls /mnt/nfs/shared /mnt/nfs/backup # монтируется при обращении
+mount | grep nfs
+3. SSH без пароля (Server-A → Server-B)
+ssh-keygen -t rsa -f ~/.ssh/id_rsa_nopass -N ""
+ssh-copy-id -i ~/.ssh/id_rsa_nopass.pub administrator@192.168.122.2
+ssh -i ~/.ssh/id_rsa_nopass administrator@192.168.122.2 # вход без пароля → exit
+4. Скрипты репликации (Server-A)
+sudo nano /usr/local/bin/sync-nfs.sh
+#!/bin/bash
+rsync -avz --delete -e "ssh -i /home/administrator/.ssh/id_rsa_nopass" /srv/nfs/shared/ administrator@192.168.122.2:/srv/nfs/shared/
+
+sudo nano /usr/local/bin/nfs-sync-watch.sh
+#!/bin/bash
+inotifywait -m -r -e modify,create,delete,move /srv/nfs/shared | while read path action file; do
+/usr/local/bin/sync-nfs.sh
+done
+
+sudo chmod +x /usr/local/bin/sync-nfs.sh /usr/local/bin/nfs-sync-watch.sh
+ls -l /usr/local/bin/sync-nfs.sh /usr/local/bin/nfs-sync-watch.sh
+5. Служба (Server-A): sudo nano
+/etc/systemd/system/nfs-sync.service
+[Unit]
+Description=Auto-sync NFS shared directory
+After=network-online.target nfs-kernel-server.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nfs-sync-watch.sh
+Restart=always
+RestartSec=10
+User=administrator
+
+[Install]
+WantedBy=multi-user.target
+sudo systemctl daemon-reload
+sudo systemctl enable --now nfs-sync.service
+sudo systemctl status nfs-sync.service # active (running), "Watches established"
+User=administrator обязательно: ключ и known_hosts у него, от root
+будет «Host key verification failed».
+6. Проверка репликации и отказоустойчивости
+touch /srv/nfs/shared/test_server.txt # Server-A
+ls -l /srv/nfs/shared/ # Server-B — файл появился
+
+echo "проверка отказоустойчивости" > /mnt/nfs/shared/test.txt # клиент
+ls -l /mnt/nfs/shared/; ls -l /mnt/nfs/backup/ # файл в обоих
+
+sudo systemctl stop nfs-kernel-server # Server-A — отказ
+sudo umount -l /mnt/nfs/shared # клиент
+ls /mnt/nfs/shared # недоступно
+ls -l /mnt/nfs/backup/; cat /mnt/nfs/backup/test.txt # данные есть на Server-B
+
+sudo systemctl start nfs-kernel-server # Server-A — вернуть

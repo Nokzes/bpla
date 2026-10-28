@@ -1,0 +1,59 @@
+Билет № 2. Пользователи и PAM — по ЛР
+«Управление учётными записями» (РЕД ОС)
+Все команды от root (sudo -i). Пункт про PAM в ваших лабах не
+встречался — он из общей методики, проверьте его заранее на
+ВМ.
+1. user1
+groupadd -g 1500 user1
+useradd -u 1500 -g user1 -G video -s /bin/bash -m user1
+passwd user1
+chage -M 60 user1 # пароль действует 60 дней
+passwd -e user1 # сменить пароль при первом входе
+
+id user1 # uid=1500 gid=1500 groups=1500(user1),39(video)
+chage -l user1 # "пароль должен быть изменён", максимум 60
+2. user2
+groupadd --gid 2000 user2
+useradd --gid 2000 --uid 2000 -m user2
+groupadd crontab # в РЕД ОС её нет: "группа crontab не существует"
+usermod -aG crontab user2
+usermod -c "Пользователь 2,111,111-111,," user2
+passwd user2
+
+lslogins user2 # UID 2000, группы user2, crontab; Gecos: Пользователь 2,111,111-111,,
+grep user2 /etc/passwd
+3. PAM: история 5 паролей + словарь и для root
+authselect current
+# если используется профиль:
+authselect enable-feature with-pwhistory
+authselect apply-changes
+
+vim /etc/security/pwhistory.conf
+remember = 5
+enforce_for_root
+
+vim /etc/security/pwquality.conf
+minlen = 8
+dictcheck = 1
+enforce_for_root
+
+grep -E "pwquality|pwhistory" /etc/pam.d/system-auth
+Если authselect не настроен («No existing configuration detected») —
+секция password в /etc/pam.d/system-auth и password-auth:
+password requisite pam_pwquality.so try_first_pass local_users_only retry=3 enforce_for_root
+password requisite pam_pwhistory.so remember=5 use_authtok enforce_for_root
+password sufficient pam_unix.so sha512 shadow try_first_pass use_authtok remember=5
+password required pam_deny.so
+4. Проверки
+# история паролей
+su - user2
+passwd # сменить несколько раз: Pass#A2026 -> Pass#B2026 -> Pass#C2026
+passwd # ввести старый -> "Password has been already used. Choose another."
+exit
+cat /etc/security/opasswd
+
+# root и словарь (раньше в ЛР root мог ставить слабый пароль — теперь нет)
+passwd user1 # ввести password -> BAD PASSWORD: ... dictionary check, пароль НЕ меняется
+passwd user1 # ввести qwerty123 -> тоже отказ
+passwd # собственный пароль root — те же правила
+echo "password" | pwscore

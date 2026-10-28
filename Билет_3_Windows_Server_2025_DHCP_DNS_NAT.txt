@@ -1,0 +1,57 @@
+Билет № 3. Windows Server 2025: DHCP,
+DNS, NAT без AD — по ЛР
+Ethernet — внешний (DHCP провайдера), Ethernet 2 — внутренний
+192.168.10.1/24. Команды в PowerShell от администратора,
+остальное — мышкой в консолях.
+1. Адаптеры (ЗАПИСАТЬ внешний IP!)
+ipconfig /all # Ethernet: напр. 192.168.122.130, шлюз 192.168.122.1 — записать
+netsh interface ipv4 set address name="Ethernet 2" static 192.168.10.1 255.255.255.0
+ipconfig /all # Ethernet 2: DHCP включен — Нет, 192.168.10.1
+netsh interface ipv4 show interfaces
+hostname # напр. WIN-7A69D86MP4P
+2. DHCP
+Install-WindowsFeature DHCP -IncludeManagementTools
+Диспетчер серверов → Средства → DHCP → сервер → ПКМ IPv4 →
+Создать область:
+Имя: InternalScope
+Диапазон: 192.168.10.50 – 192.168.10.200, маска 255.255.255.0 (/24)
+Исключения: нет · Аренда: 0 дн 8 ч 0 мин
+Настроить параметры DHCP сейчас: Да
+Маршрутизатор: 192.168.10.1 → Добавить
+DNS: родительский домен пусто, IP 192.168.10.1 → Добавить
+WINS: пусто · Активировать область: Да → Готово
+Авторизация в AD не нужна (сервер не в домене).
+3. DNS
+Install-WindowsFeature -Name DNS -IncludeManagementTools
+Средства → DNS → сервер → Зоны прямого просмотра → Действие
+→ Создать новую зону:
+Основная зона (флажок «в AD» недоступен) → Имя: college.local
+Файл: college.local.dns (создать новый) → Запретить динамические обновления → Готово
+college.local → ПКМ → Создать узел (A):
+   WIN-7A69D86MP4P = 192.168.10.1
+   client1 = 192.168.10.100 (PTR не ставить)
+college.local → ПКМ → Создать псевдоним (CNAME): www → WIN-7A69D86MP4P.college.local
+4. NAT
+Install-WindowsFeature -Name RemoteAccess, Routing -IncludeManagementTools
+Средства → Маршрутизация и удаленный доступ → ПКМ по
+серверу → Настроить и включить:
+Особая конфигурация → [x] NAT [x] Маршрутизация локальной сети → Готово → Запустить службу
+IPv4 → ПКМ «Преобразование сетевых адресов (NAT)» → Новый интерфейс:
+   Ethernet → «Общий интерфейс подключен к Интернету» + [x] Включить NAT на данном интерфейсе
+   Ethernet 2 → «Частный интерфейс подключен к частной сети»
+5. Проверка (клиенты — 3 шт.)
+# Linux-клиент:
+ip a # 192.168.10.50/24 dynamic
+ip route # default via 192.168.10.1 proto dhcp
+cat /etc/resolv.conf # nameserver 192.168.10.1
+nslookup WIN-7A69D86MP4P.college.local
+nslookup www.college.local # CNAME -> WIN-7A69D86MP4P, 192.168.10.1
+ping -c 4 192.168.122.1 # шлюз внешней сети, TTL 63 = прошли через сервер
+ping -c 4 ya.ru
+nmcli device disconnect eth1; nmcli device connect eth1 # получить адрес заново
+# Windows-клиент:
+ipconfig /release; ipconfig /renew; ipconfig /all; nslookup www.college.local; ping ya.ru
+На сервере: DHCP → IPv4 → InternalScope → Арендованные адреса
+(видны все клиенты, MAC совпадает). RRAS → NAT → счётчики
+сопоставлений/пакетов растут на Ethernet. Пакеты во внешней
+сети идут с записанного внешнего IP.

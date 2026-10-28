@@ -1,0 +1,92 @@
+Билет № 4. Samba + SELinux — по ЛР
+«Настройка SELinux при организации
+доступа Samba» (РЕД ОС 8)
+Сервер 192.168.122.23. Все команды от root (sudo -i).
+1. Пакеты, пользователи, каталоги
+getenforce # Enforcing
+dnf install samba samba-client policycoreutils-python-utils
+useradd student; useradd manager1; useradd boss
+groupadd managers
+usermod -aG managers manager1
+passwd student; passwd manager1; passwd boss
+
+mkdir -p /srv/samba/lab_share/{public,managers,secret}
+chown root:managers /srv/samba/lab_share/public; chmod 0775 /srv/samba/lab_share/public
+chown root:managers /srv/samba/lab_share/managers; chmod 0770 /srv/samba/lab_share/managers
+chown boss:boss /srv/samba/lab_share/secret; chmod 0700 /srv/samba/lab_share/secret
+echo "public content" | tee /srv/samba/lab_share/public/readme.txt
+echo "managers content" | tee /srv/samba/lab_share/managers/readme.txt
+echo "secret content" | tee /srv/samba/lab_share/secret/readme.txt
+
+ls -ld /srv/samba/lab_share/public /srv/samba/lab_share/managers /srv/samba/lab_share/secret
+ls -lR /srv/samba/lab_share
+2. nano /etc/samba/smb.conf (в конец файла)
+[lab_public]
+path = /srv/samba/lab_share/public
+valid users = student, manager1, boss
+writable = yes
+browseable = yes
+
+[lab_managers]
+path = /srv/samba/lab_share/managers
+valid users = manager1, boss
+writable = yes
+browseable = yes
+
+[lab_secret]
+path = /srv/samba/lab_share/secret
+valid users = boss
+writable = yes
+browseable = no
+testparm # Loaded services file OK
+smbpasswd -a student; smbpasswd -a manager1; smbpasswd -a boss
+smbpasswd -e student; smbpasswd -e manager1; smbpasswd -e boss
+systemctl enable --now smb
+systemctl status smb --no-pager
+firewall-cmd --permanent --add-service=samba; firewall-cmd --reload # если firewalld запущен
+3. Воспроизвести и найти отказ SELinux
+ls -Z /srv/samba/lab_share/ # var_t — Samba сюда нельзя
+
+# клиент Linux:
+smbclient //192.168.122.23/lab_public -U manager1
+smb: \> mkdir test_dir # NT_STATUS_ACCESS_DENIED making remote directory
+
+# сервер:
+ausearch -m avc -ts recent # avc: denied { create } scontext=smbd_t tcontext=var_t
+4. Постоянное правило контекста
+semanage fcontext -a -t samba_share_t "/srv/samba/lab_share(/.*)?"
+restorecon -Rv /srv/samba/lab_share/ # 7 x Relabeled var_t -> samba_share_t
+ls -Z /srv/samba/lab_share/
+ls -Z /srv/samba/lab_share/managers/ /srv/samba/lab_share/secret/
+semanage fcontext -l | grep lab_share
+
+# клиент — теперь работает:
+smbclient //192.168.122.23/lab_public -U manager1
+smb: \> mkdir test_dir
+smb: \> ls
+smb: \> exit
+semanage fcontext — правило в политике (переживает
+restorecon/перемаркировку/reboot), chcon — временно.
+5. Проверка с Linux-клиента
+smbclient -L //192.168.122.23 -U student
+smbclient -L //192.168.122.23 -U manager1
+smbclient -L //192.168.122.23 -U boss # lab_secret в списке нет (browseable = no)
+
+smbclient //192.168.122.23/lab_public -U student # smb: \> — ок
+smbclient //192.168.122.23/lab_managers -U student # ACCESS_DENIED
+smbclient //192.168.122.23/lab_secret -U manager1 # tree connect failed: NT_STATUS_ACCESS_DENIED
+smbclient //192.168.122.23/lab_secret -U boss # ок
+6. Проверка с Windows-клиента (cmd)
+net use \\192.168.122.23\lab_public /user:student *
+dir \\192.168.122.23\lab_public
+net use * /delete /y # Windows держит одну учётку на сервер — сбрасывать между входами
+
+net use \\192.168.122.23\lab_managers /user:manager1 *
+dir \\192.168.122.23\lab_managers
+net use * /delete /y
+
+net use \\192.168.122.23\lab_secret /user:boss *
+type \\192.168.122.23\lab_secret\readme.txt
+net use * /delete /y
+Или в Проводнике: \\192.168.122.23\lab_public и т.д. student к
+lab_managers/lab_secret → «Отказано в доступе».
