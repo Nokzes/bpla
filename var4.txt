@@ -1,26 +1,99 @@
-Билет № 4. Samba + SELinux — по ЛР
-«Настройка SELinux при организации
-доступа Samba» (РЕД ОС 8)
-Сервер 192.168.122.23. Все команды от root (sudo -i).
-1. Пакеты, пользователи, каталоги
-getenforce # Enforcing
+=====================================================================
+БИЛЕТ № 4. Samba + SELinux: многоуровневый доступ (РЕД ОС 8)
+(по ЛР ОРСОС №8 «Настройка SELinux при организации доступа Samba»)
+=====================================================================
+
+ЗАДАНИЕ ИЗ БИЛЕТА
+- Каталоги /srv/samba/lab_share/{public,managers,secret}, права Linux.
+- Пользователи student, manager1, boss; группа managers (в ней manager1).
+- Права: public  root:managers 0775
+         managers root:managers 0770
+         secret  boss:boss     0700
+- В каждом каталоге контрольный файл. Показать ls -ld и ls -lR.
+- Samba с разграничением по учёткам.
+- Воспроизвести и диагностировать отказ из-за SELinux.
+- Постоянное правило контекста + доказать, что помогло.
+- Проверить с Linux (smbclient, smbclient -L) и Windows (\\IP\lab_...).
+
+СХЕМА
+  Samba-сервер РЕД ОС 8   192.168.122.23  (SELinux Enforcing)
+  Linux-клиент            (smbclient)
+  Windows-клиент          (Проводник / net use)
+
+ТРИ УРОВНЯ ПРОВЕРКИ ДОСТУПА (главная мысль билета, спросят!)
+  1) Samba:   пароль из базы smbpasswd + "valid users" в smb.conf
+  2) Права Linux (DAC): владелец, группа, rwx (0775/0770/0700)
+  3) SELinux (MAC): тип файла должен подходить процессу smbd (домен smbd_t).
+     smbd может работать только с типом samba_share_t.
+     Каталоги в /srv по умолчанию получают тип var_t -> SELinux запрещает,
+     ДАЖЕ ЕСЛИ права 0777.
+  Доступ есть, только если "да" сказали ВСЕ три уровня.
+
+Команды - от root (sudo -i).
+
+
+---------------------------------------------------------------------
+ШАГ 1. Подготовка                                       [ГДЕ: сервер]
+---------------------------------------------------------------------
+getenforce
+#  должно быть Enforcing (политика реально блокирует).
+#  Если нет: /etc/selinux/config -> SELINUX=enforcing и перезагрузка.
+
 dnf install samba samba-client policycoreutils-python-utils
-useradd student; useradd manager1; useradd boss
+#  samba         - демоны smbd (файлы) и nmbd (имена NetBIOS)
+#  samba-client  - smbclient
+#  policycoreutils-python-utils - утилита semanage. В минимальной РЕД ОС
+#     её нет ("semanage: команда не найдена"), пакет нашли через:
+#     dnf provides semanage
+
+
+---------------------------------------------------------------------
+ШАГ 2. Пользователи и группа                            [ГДЕ: сервер]
+---------------------------------------------------------------------
+useradd student
+useradd manager1
+useradd boss
 groupadd managers
 usermod -aG managers manager1
+#  -aG = ДОБАВИТЬ в доп. группу, не трогая остальные
+
 passwd student; passwd manager1; passwd boss
+#  системные пароли (у Samba будет СВОЯ база паролей, см. шаг 5)
 
+
+---------------------------------------------------------------------
+ШАГ 3. Каталоги и права Linux                           [ГДЕ: сервер]
+---------------------------------------------------------------------
 mkdir -p /srv/samba/lab_share/{public,managers,secret}
-chown root:managers /srv/samba/lab_share/public; chmod 0775 /srv/samba/lab_share/public
-chown root:managers /srv/samba/lab_share/managers; chmod 0770 /srv/samba/lab_share/managers
-chown boss:boss /srv/samba/lab_share/secret; chmod 0700 /srv/samba/lab_share/secret
-echo "public content" | tee /srv/samba/lab_share/public/readme.txt
-echo "managers content" | tee /srv/samba/lab_share/managers/readme.txt
-echo "secret content" | tee /srv/samba/lab_share/secret/readme.txt
+#  -p - создать и родительские каталоги; {a,b,c} оболочка раскроет в 3 пути
 
+chown root:managers /srv/samba/lab_share/public;   chmod 0775 /srv/samba/lab_share/public
+#  public: все входят и читают, пишут владелец и группа managers
+chown root:managers /srv/samba/lab_share/managers; chmod 0770 /srv/samba/lab_share/managers
+#  managers: только группа managers, остальным вход закрыт
+chown boss:boss /srv/samba/lab_share/secret;       chmod 0700 /srv/samba/lab_share/secret
+#  secret: только boss
+
+echo "public content"   > /srv/samba/lab_share/public/readme.txt
+echo "managers content" > /srv/samba/lab_share/managers/readme.txt
+echo "secret content"   > /srv/samba/lab_share/secret/readme.txt
+#  контрольные файлы (через sudo было бы: echo ... | sudo tee файл)
+
+# ПОДТВЕРЖДЕНИЕ ЭТАПА (требуется в билете)
 ls -ld /srv/samba/lab_share/public /srv/samba/lab_share/managers /srv/samba/lab_share/secret
+#  drwxrwxr-x. root managers public
+#  drwxrwx---. root managers managers
+#  drwx------. boss boss     secret
+#  ТОЧКА после прав = у файла есть метка SELinux
 ls -lR /srv/samba/lab_share
-2. nano /etc/samba/smb.conf (в конец файла)
+#  рекурсивно: каталоги + readme.txt в каждом
+
+
+---------------------------------------------------------------------
+ШАГ 4. Конфигурация Samba                               [ГДЕ: сервер]
+---------------------------------------------------------------------
+nano /etc/samba/smb.conf       (дописать В КОНЕЦ файла)
+
 [lab_public]
 path = /srv/samba/lab_share/public
 valid users = student, manager1, boss
@@ -38,55 +111,151 @@ path = /srv/samba/lab_share/secret
 valid users = boss
 writable = yes
 browseable = no
-testparm # Loaded services file OK
-smbpasswd -a student; smbpasswd -a manager1; smbpasswd -a boss
-smbpasswd -e student; smbpasswd -e manager1; smbpasswd -e boss
+
+#  [имя]        - имя ресурса в сети (\\сервер\lab_public)
+#  path         - какой каталог открываем
+#  valid users  - кому можно ПОДКЛЮЧИТЬСЯ (проверка до прав Linux)
+#  writable     - разрешить запись (testparm покажет как read only = No)
+#  browseable   - показывать ли ресурс в СПИСКЕ. browseable = no прячет
+#                 ресурс, но подключиться по имени всё равно можно.
+
+testparm
+#  "Loaded services file OK", "Server role: ROLE_STANDALONE" - ошибок нет,
+#  сервер сам по себе (без домена). Enter - покажет итоговые ресурсы.
+
+
+---------------------------------------------------------------------
+ШАГ 5. База Samba и запуск                              [ГДЕ: сервер]
+---------------------------------------------------------------------
+smbpasswd -a student;  smbpasswd -a manager1;  smbpasswd -a boss
+#  -a - добавить в базу Samba и задать SMB-пароль (может отличаться от системного)
+smbpasswd -e student;  smbpasswd -e manager1;  smbpasswd -e boss
+#  -e - включить учётку ("Enabled user")
+
 systemctl enable --now smb
+#  enable - автозапуск, --now - запустить сразу
 systemctl status smb --no-pager
-firewall-cmd --permanent --add-service=samba; firewall-cmd --reload # если firewalld запущен
-3. Воспроизвести и найти отказ SELinux
-ls -Z /srv/samba/lab_share/ # var_t — Samba сюда нельзя
+#  active (running), "smbd: ready to serve connections"
 
-# клиент Linux:
-smbclient //192.168.122.23/lab_public -U manager1
-smb: \> mkdir test_dir # NT_STATUS_ACCESS_DENIED making remote directory
+firewall-cmd --permanent --add-service=samba; firewall-cmd --reload
+#  если firewalld запущен (systemctl is-active firewalld). Открывает 445/139.
 
-# сервер:
-ausearch -m avc -ts recent # avc: denied { create } scontext=smbd_t tcontext=var_t
-4. Постоянное правило контекста
+
+---------------------------------------------------------------------
+ШАГ 6. ВОСПРОИЗВЕСТИ ОТКАЗ SELINUX
+---------------------------------------------------------------------
+ls -Z /srv/samba/lab_share/                              [ГДЕ: сервер]
+#  unconfined_u:object_r:var_t:s0  - тип var_t. Samba сюда писать НЕЛЬЗЯ.
+
+smbclient //192.168.122.23/lab_public -U manager1        [ГДЕ: Linux-клиент]
+smb: \> mkdir test_dir
+#  NT_STATUS_ACCESS_DENIED making remote directory \test_dir
+#  СТРАННО: manager1 в группе managers, права 0775 - писать можно.
+#  Значит, запрещает НЕ обычная защита, а SELinux.
+smb: \> exit
+
+ausearch -m avc -ts recent                               [ГДЕ: сервер]
+#  -m avc     - только отказы SELinux (Access Vector Cache)
+#  -ts recent - за последние 10 минут
+#  Видим:  avc: denied { create } ... comm="smbd"
+#          scontext=system_u:system_r:smbd_t:s0
+#          tcontext=...:var_t:s0  tclass=dir  permissive=0
+#  ПЕРЕВОД: процессу smbd (домен smbd_t) запретили СОЗДАТЬ каталог в объекте
+#  с типом var_t. permissive=0 - действие реально заблокировано.
+#  В SYSCALL: success=no exit=-13 (EACCES = отказ в доступе).
+
+
+---------------------------------------------------------------------
+ШАГ 7. ПОСТОЯННОЕ ПРАВИЛО КОНТЕКСТА (исправление)       [ГДЕ: сервер]
+---------------------------------------------------------------------
 semanage fcontext -a -t samba_share_t "/srv/samba/lab_share(/.*)?"
-restorecon -Rv /srv/samba/lab_share/ # 7 x Relabeled var_t -> samba_share_t
+#  -a - добавить правило в локальную политику (НАВСЕГДА)
+#  -t samba_share_t - какой тип назначать
+#  "(/.*)?" - и сам каталог lab_share, и всё внутри
+#  ВАЖНО: правило само метки у уже созданных файлов НЕ меняет ->
+
+restorecon -Rv /srv/samba/lab_share/
+#  применяет правила политики к существующим файлам.
+#  -R рекурсивно, -v показать изменения:
+#  7 строк "Relabeled ... var_t -> samba_share_t"
+#  (lab_share, 3 подкаталога, 3 readme.txt)
+
 ls -Z /srv/samba/lab_share/
 ls -Z /srv/samba/lab_share/managers/ /srv/samba/lab_share/secret/
+#  теперь везде samba_share_t
 semanage fcontext -l | grep lab_share
+#  правило есть в политике
 
-# клиент — теперь работает:
+smb перезапускать НЕ нужно - smbd проверяет метку при каждом обращении.
+
+# ДОКАЗАТЕЛЬСТВО                                         [ГДЕ: Linux-клиент]
 smbclient //192.168.122.23/lab_public -U manager1
-smb: \> mkdir test_dir
-smb: \> ls
+smb: \> mkdir test_dir      # теперь без ошибок
+smb: \> ls                  # test_dir и readme.txt
 smb: \> exit
-semanage fcontext — правило в политике (переживает
-restorecon/перемаркировку/reboot), chcon — временно.
-5. Проверка с Linux-клиента
+#  SELinux НЕ отключали и в Permissive НЕ переводили - исправили правильно.
+
+ПОЧЕМУ semanage, а не chcon (спросят):
+  chcon -t samba_share_t ... меняет метку ВРЕМЕННО: после restorecon или
+  перемаркировки ФС (touch /.autorelabel, reboot) вернётся var_t.
+  semanage fcontext записывает ПРАВИЛО в политику - переживает всё.
+ПОЧЕМУ НЕ setenforce 0: это выключение защиты. Если smbd взломают,
+  SELinux больше не ограничит злоумышленника.
+
+
+---------------------------------------------------------------------
+ШАГ 8. ПРОВЕРКА С LINUX-КЛИЕНТА
+---------------------------------------------------------------------
 smbclient -L //192.168.122.23 -U student
 smbclient -L //192.168.122.23 -U manager1
-smbclient -L //192.168.122.23 -U boss # lab_secret в списке нет (browseable = no)
+smbclient -L //192.168.122.23 -U boss
+#  -L - список ресурсов. У ВСЕХ троих: lab_public, lab_managers, IPC$, print$, домашний.
+#  lab_secret НЕТ даже у boss - browseable = no.
+#  lab_managers видит и student: valid users на СПИСОК не влияет,
+#  только на ПОДКЛЮЧЕНИЕ.
+#  "SMB1 disabled -- no workgroup available" - это нормально.
 
-smbclient //192.168.122.23/lab_public -U student # smb: \> — ок
-smbclient //192.168.122.23/lab_managers -U student # ACCESS_DENIED
-smbclient //192.168.122.23/lab_secret -U manager1 # tree connect failed: NT_STATUS_ACCESS_DENIED
-smbclient //192.168.122.23/lab_secret -U boss # ок
-6. Проверка с Windows-клиента (cmd)
+smbclient //192.168.122.23/lab_public -U student      # smb: \>  - пустили
+smbclient //192.168.122.23/lab_managers -U student    # NT_STATUS_ACCESS_DENIED - нет в valid users
+smbclient //192.168.122.23/lab_managers -U manager1   # пустили
+smbclient //192.168.122.23/lab_secret -U manager1     # tree connect failed: NT_STATUS_ACCESS_DENIED
+smbclient //192.168.122.23/lab_secret -U boss         # пустили (скрытый, но по имени можно)
+#  внутри: ls, get readme.txt, put файл, exit
+
+
+---------------------------------------------------------------------
+ШАГ 9. ПРОВЕРКА С WINDOWS-КЛИЕНТА                 [ГДЕ: Windows, cmd]
+---------------------------------------------------------------------
 net use \\192.168.122.23\lab_public /user:student *
+#  * - спросит пароль (SMB-пароль из smbpasswd)
 dir \\192.168.122.23\lab_public
-net use * /delete /y # Windows держит одну учётку на сервер — сбрасывать между входами
+net use * /delete /y
+#  ЗАЧЕМ delete: Windows держит ОДНУ учётку на один сервер. Без сброса
+#  следующий вход другим пользователем выдаст ошибку 1219.
 
 net use \\192.168.122.23\lab_managers /user:manager1 *
 dir \\192.168.122.23\lab_managers
 net use * /delete /y
 
 net use \\192.168.122.23\lab_secret /user:boss *
-type \\192.168.122.23\lab_secret\readme.txt
+type \\192.168.122.23\lab_secret\readme.txt      # secret content
 net use * /delete /y
-Или в Проводнике: \\192.168.122.23\lab_public и т.д. student к
-lab_managers/lab_secret → «Отказано в доступе».
+
+# отказ для наглядности:
+net use \\192.168.122.23\lab_managers /user:student *    # Системная ошибка 5. Отказано в доступе.
+
+В Проводнике: в адресной строке \\192.168.122.23\lab_public  (и т.д.).
+lab_secret в \\192.168.122.23 не виден - но открывается, если набрать имя.
+ЗАЧЕМ Windows: доказывает, что настройка SELinux не зависит от клиента -
+запросы любой ОС обрабатывает тот же smbd в домене smbd_t.
+
+
+---------------------------------------------------------------------
+ЧАСТЫЕ ОШИБКИ
+---------------------------------------------------------------------
+- Забыл smbpasswd -a -> пользователь не может войти (это НЕ системный пароль).
+- semanage сделал, а restorecon забыл -> на старых файлах всё ещё var_t.
+- Выключил SELinux вместо правила -> по билету это неправильное решение.
+- ls -Z /srv/samba/lab_share/secret без root -> "Отказано в доступе" из-за 0700
+  (это обычные права, не SELinux).
+- Windows: ошибка 1219 -> net use * /delete /y.

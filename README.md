@@ -1,9 +1,14 @@
-# Билеты по лабораторным
+# Билеты по ОРСОС
 
-Подготовка к экзамену по 5 билетам (исходник — `Bilety_po_labam.pdf`), по одному `.txt` на билет:
+Подготовка к экзамену «Основы работы с сетевыми операционными системами».
+Каждый файл — один билет: что требует билет, схема, команды по шагам с пометками
+**ГДЕ** выполнять и **ЗАЧЕМ** это нужно, проверки и частые ошибки.
+Команды взяты из моих лабораторных ОРСОС.
 
-1. `var1.txt` — пара DNS BIND9 (Primary/Secondary, TSIG)
-2. `var2.txt` — useradd/groupadd/passwd, PAM (история паролей, словарь для root)
-3. `var3.txt` — Windows Server 2025: DHCP, DNS, NAT без AD
-4. `var4.txt` — Samba + SELinux
-5. `var5.txt` — NFS + autofs + репликация rsync/inotifywait
+| Файл | Билет | Лаба |
+|------|-------|------|
+| `var1.txt` | Отказоустойчивая пара DNS BIND9 (TSIG, отказ Primary) | ОРСОС №2 |
+| `var2.txt` | useradd/groupadd/passwd, PAM: история 5 паролей, словарь для root | ОРСОС №3 (+ PAM по документации) |
+| `var3.txt` | Windows Server 2025: DHCP, DNS, NAT без AD | ОРСОС №6 |
+| `var4.txt` | Samba + SELinux, многоуровневый доступ | ОРСОС №8 |
+| `var5.txt` | NFS + autofs + репликация rsync/inotifywait | ОРСОС №7 |

@@ -1,65 +1,170 @@
-Билет № 5. NFS + autofs + репликация
-rsync/inotifywait — по ЛР (Astra Linux SE
-1.8)
-Server-A 192.168.122.111, Server-B 192.168.122.2, пользователь
-administrator. На РЕД ОС вместо apt — dnf, пакет nfs-utils, служба
-nfs-server.
-1. Server-A и Server-B (одинаково, свои адреса)
-sudo nmtui # enp1s0 → IPv4 Вручную: 192.168.122.111/24, шлюз .1, DNS 8.8.8.8
+=====================================================================
+БИЛЕТ № 5. Два NFS-сервера + autofs + репликация rsync/inotifywait
+(по ЛР ОРСОС №7 «NFS и автоматическая репликация данных», Astra Linux SE 1.8)
+=====================================================================
+
+ЗАДАНИЕ ИЗ БИЛЕТА
+- Два NFS-сервера (Server-A и Server-B), экспорт общих каталогов.
+- NFS-клиент с автомонтированием ПО ЗАПРОСУ через autofs.
+- Автоматическая репликация Server-A -> Server-B через rsync + inotifywait.
+- Отказоустойчивость: Server-A упал -> данные доступны на Server-B.
+
+СХЕМА (как в лабе)
+  Server-A  192.168.122.111  - основной NFS + служба nfs-sync (отправляет копии)
+  Server-B  192.168.122.2    - запасной NFS + SSH (принимает копии)
+  Клиент                      - autofs: /mnt/nfs/shared (A) и /mnt/nfs/backup (B)
+  Пользователь на серверах: administrator (UID 1000)
+  Порты: NFS 2049/TCP (+111 rpcbind для v3), репликация SSH 22/TCP
+
+КАК ВСЁ СВЯЗАНО
+  клиент --NFS--> Server-A:/srv/nfs/shared  --(inotifywait видит изменение)-->
+  --> rsync по SSH --> Server-B:/srv/nfs/shared  <--NFS-- клиент (/mnt/nfs/backup)
+  NFS     - подключить папку другого компьютера как свою.
+  autofs  - монтирует папку автоматически, когда к ней обратились.
+  inotifywait - ядро сообщает "файл создан/изменён/удалён".
+  rsync   - копирует ТОЛЬКО изменения на другой сервер.
+  systemd - держит всё это запущенным постоянно.
+
+Если сдаёшь на РЕД ОС, а не Astra: вместо apt - dnf, пакеты
+nfs-utils autofs rsync inotify-tools, служба nfs-server (вместо nfs-kernel-server),
+порты: firewall-cmd --permanent --add-service={nfs,rpc-bind,mountd}; firewall-cmd --reload
+
+
+---------------------------------------------------------------------
+ШАГ 1. Сеть и пакеты                         [ГДЕ: Server-A И Server-B]
+---------------------------------------------------------------------
+nmcli device show
+#  текущие настройки (enp1s0, адрес, шлюз)
+
+sudo nmtui
+#  "Изменить подключение" -> enp1s0 -> IPv4 "Вручную":
+#  Server-A: 192.168.122.111/24     Server-B: 192.168.122.2/24
+#  шлюз 192.168.122.1, DNS 8.8.8.8, [x] Подключаться автоматически
+#  ЗАЧЕМ: клиент и rsync ходят по АДРЕСАМ - адрес не должен меняться.
 sudo nmcli connection up enp1s0
-sudo nano /etc/apt/sources.list # закомментировать строку cdrom
+#  применить ("Подключение успешно активировано")
+
+sudo nano /etc/apt/sources.list
+#  закомментировать (#) строку с cdrom, иначе apt просит установочный диск
 sudo apt update
 sudo apt install nfs-kernel-server nfs-common autofs rsync inotify-tools
+#  nfs-kernel-server - NFS-сервер; nfs-common - клиентские утилиты;
+#  rsync - копирование; inotify-tools - inotifywait
 
+
+---------------------------------------------------------------------
+ШАГ 2. Экспорт NFS                           [ГДЕ: Server-A И Server-B]
+---------------------------------------------------------------------
 sudo mkdir -p /srv/nfs/shared
 sudo chmod 777 /srv/nfs/shared
+#  777 - для лабы, чтобы клиенты с любым UID могли писать.
+#  (В реальной сети лучше согласовать UID/GID или all_squash + anonuid.)
+
 sudo nano /etc/exports
 /srv/nfs/shared 192.168.122.0/24(rw,sync,root_squash,no_subtree_check)
+#  /srv/nfs/shared   - что отдаём
+#  192.168.122.0/24  - кому (вся наша сеть)
+#  rw                - чтение и запись
+#  sync              - "записано" отвечаем только когда данные на диске
+#  root_squash       - root клиента на сервере = nobody (65534). Защита!
+#  no_subtree_check  - без проверки вложенных путей (надёжнее при переименовании)
+#  На обоих серверах одинаково - хранилища устроены одинаково.
 
+# Привязка NFS к rpcbind (в Astra служба может не стартовать без этого):
 sudo nano /etc/systemd/system/multi-user.target.wants/nfs-server.service
-# в конец секции [Unit]:
+#  в конец секции [Unit]:
 Requires=rpcbind.service
 After=rpcbind.service
+#  Requires - без rpcbind NFS не работает; After - запускать ПОСЛЕ rpcbind.
+#  (Аккуратнее то же самое: sudo systemctl edit nfs-server - создаст drop-in.)
 
-sudo systemctl daemon-reload
-sudo exportfs -ra
+sudo systemctl daemon-reload            # перечитать файлы служб
+sudo exportfs -ra                       # -a все экспорты, -r пересверить с /etc/exports
 sudo systemctl restart nfs-kernel-server
 sudo systemctl enable nfs-kernel-server
-sudo showmount -e localhost # /srv/nfs/shared
-2. Клиент: autofs (прямая карта)
+sudo showmount -e localhost             # Export list: /srv/nfs/shared 192.168.122.0/24
+sudo exportfs -v                        # действующие параметры экспорта
+
+
+---------------------------------------------------------------------
+ШАГ 3. Клиент: autofs (прямая карта)                     [ГДЕ: клиент]
+---------------------------------------------------------------------
 sudo apt install nfs-common autofs
 sudo mkdir -p /mnt/nfs
+
 sudo nano /etc/auto.master
+#  в конец:
 /- /etc/auto.nfs
+#  "/-" = ПРЯМАЯ карта: в ней полные пути точек монтирования.
+#  (Косвенная - когда в auto.master пишут родительский каталог, напр. /mnt/nfs /etc/auto.nfs)
 
 sudo nano /etc/auto.nfs
 /mnt/nfs/shared -fstype=nfs,rw,soft,intr 192.168.122.111:/srv/nfs/shared
 /mnt/nfs/backup -fstype=nfs,rw,soft,intr 192.168.122.2:/srv/nfs/shared
+#  /mnt/nfs/shared - основная папка с Server-A
+#  /mnt/nfs/backup - запасная с Server-B
+#  soft - если сервер недоступен, программа получит ошибку, а не зависнет навсегда
+#  intr - зависшую операцию можно прервать
 
 sudo systemctl daemon-reload
 sudo systemctl restart autofs
 sudo systemctl enable autofs
-ls /mnt/nfs/shared /mnt/nfs/backup # монтируется при обращении
-mount | grep nfs
-3. SSH без пароля (Server-A → Server-B)
+
+ls /mnt/nfs/shared /mnt/nfs/backup     # обращение -> autofs монтирует
+mount | grep nfs                       # теперь видно 2 NFS-монтирования
+#  До обращения в mount их НЕТ - это и есть "монтирование по запросу".
+
+
+---------------------------------------------------------------------
+ШАГ 4. SSH без пароля Server-A -> Server-B              [ГДЕ: Server-A]
+---------------------------------------------------------------------
+ЗАЧЕМ: репликацию запускает служба - пароль ей вводить некому.
+Всё делаем ОТ ПОЛЬЗОВАТЕЛЯ administrator (не через sudo!).
+
 ssh-keygen -t rsa -f ~/.ssh/id_rsa_nopass -N ""
+#  -t rsa - тип; -f - файл ключа; -N "" - пустая парольная фраза
 ssh-copy-id -i ~/.ssh/id_rsa_nopass.pub administrator@192.168.122.2
-ssh -i ~/.ssh/id_rsa_nopass administrator@192.168.122.2 # вход без пароля → exit
-4. Скрипты репликации (Server-A)
+#  отвечаем yes (отпечаток Server-B попадает в known_hosts), вводим пароль
+#  "Number of key(s) added: 1"
+ssh -i ~/.ssh/id_rsa_nopass administrator@192.168.122.2
+#  вошли БЕЗ пароля -> exit
+
+
+---------------------------------------------------------------------
+ШАГ 5. Скрипты репликации                               [ГДЕ: Server-A]
+---------------------------------------------------------------------
 sudo nano /usr/local/bin/sync-nfs.sh
 #!/bin/bash
 rsync -avz --delete -e "ssh -i /home/administrator/.ssh/id_rsa_nopass" /srv/nfs/shared/ administrator@192.168.122.2:/srv/nfs/shared/
+#  -a  архив: сохраняет права, владельцев, время
+#  -v  подробно;  -z  сжимать при передаче
+#  --delete  удалить на B то, что удалили на A (зеркало)
+#  -e "ssh -i ..."  ехать по SSH с нашим ключом. Путь ПОЛНЫЙ - скрипт запускает systemd.
+#  "/srv/nfs/shared/" со слэшем = копировать СОДЕРЖИМОЕ, а не саму папку
 
 sudo nano /usr/local/bin/nfs-sync-watch.sh
 #!/bin/bash
 inotifywait -m -r -e modify,create,delete,move /srv/nfs/shared | while read path action file; do
 /usr/local/bin/sync-nfs.sh
 done
+#  -m  следить постоянно (не выходить после первого события)
+#  -r  и во вложенных папках
+#  -e  какие события: изменение, создание, удаление, перемещение
+#  на каждое событие запускаем sync-nfs.sh
+#  ЗАЧЕМ отдельный скрипт: systemd не умеет конвейер "|" прямо в ExecStart.
 
 sudo chmod +x /usr/local/bin/sync-nfs.sh /usr/local/bin/nfs-sync-watch.sh
 ls -l /usr/local/bin/sync-nfs.sh /usr/local/bin/nfs-sync-watch.sh
-5. Служба (Server-A): sudo nano
-/etc/systemd/system/nfs-sync.service
+#  -rwxr-xr-x у обоих. Без +x служба "запустится", но ничего не будет делать.
+/usr/local/bin/sync-nfs.sh
+#  (по желанию) ручной прогон - убедиться, что rsync проходит без пароля
+
+
+---------------------------------------------------------------------
+ШАГ 6. Служба systemd                                   [ГДЕ: Server-A]
+---------------------------------------------------------------------
+sudo nano /etc/systemd/system/nfs-sync.service
+
 [Unit]
 Description=Auto-sync NFS shared directory
 After=network-online.target nfs-kernel-server.service
@@ -73,21 +178,72 @@ User=administrator
 
 [Install]
 WantedBy=multi-user.target
+
+#  After/Wants   - стартовать после сети и NFS-сервера
+#  ExecStart     - что запускать
+#  Restart=always, RestartSec=10 - упала -> перезапуск через 10 секунд
+#  User=administrator - ОБЯЗАТЕЛЬНО: ключ и known_hosts лежат у него.
+#     От root будет "Host key verification failed".
+#  WantedBy=multi-user.target - включать при обычной загрузке
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now nfs-sync.service
-sudo systemctl status nfs-sync.service # active (running), "Watches established"
-User=administrator обязательно: ключ и known_hosts у него, от root
-будет «Host key verification failed».
-6. Проверка репликации и отказоустойчивости
-touch /srv/nfs/shared/test_server.txt # Server-A
-ls -l /srv/nfs/shared/ # Server-B — файл появился
+sudo systemctl status nfs-sync.service
+#  active (running), процессы nfs-sync-watch.sh и inotifywait,
+#  в журнале "Watches established" - слежение началось
+#  логи: journalctl -u nfs-sync -f
 
-echo "проверка отказоустойчивости" > /mnt/nfs/shared/test.txt # клиент
-ls -l /mnt/nfs/shared/; ls -l /mnt/nfs/backup/ # файл в обоих
 
-sudo systemctl stop nfs-kernel-server # Server-A — отказ
-sudo umount -l /mnt/nfs/shared # клиент
-ls /mnt/nfs/shared # недоступно
-ls -l /mnt/nfs/backup/; cat /mnt/nfs/backup/test.txt # данные есть на Server-B
+---------------------------------------------------------------------
+ШАГ 7. ПРОВЕРКА РЕПЛИКАЦИИ
+---------------------------------------------------------------------
+touch /srv/nfs/shared/test_server.txt                    # [Server-A]
+ls -l /srv/nfs/shared/                                   # [Server-B] файл появился сам
 
-sudo systemctl start nfs-kernel-server # Server-A — вернуть
+echo "проверка отказоустойчивости" > /mnt/nfs/shared/test.txt    # [клиент] пишем на A через NFS
+ls -l /mnt/nfs/shared/                                   # [клиент] файл на A
+ls -l /mnt/nfs/backup/                                   # [клиент] тот же файл уже на B
+mount | grep nfs                                         # оба смонтированы autofs-ом
+
+
+---------------------------------------------------------------------
+ШАГ 8. ОТКАЗ SERVER-A (главная часть билета)
+---------------------------------------------------------------------
+sudo systemctl stop nfs-kernel-server                    # [Server-A] имитируем поломку
+
+sudo umount -l /mnt/nfs/shared                           # [клиент]
+#  -l "ленивое" размонтирование: отключить сразу, освободить когда отпустят.
+#  ЗАЧЕМ: чтобы клиент не завис на недоступном сервере.
+ls /mnt/nfs/shared                                       # недоступно / ошибка
+ls -l /mnt/nfs/backup/                                   # файлы на месте
+cat /mnt/nfs/backup/test.txt                             # "проверка отказоустойчивости"
+#  ВЫВОД: Server-A не работает, данные доступны с Server-B.
+
+sudo systemctl start nfs-kernel-server                   # [Server-A] вернуть
+
+
+---------------------------------------------------------------------
+ЧТО ЕЩЁ МОГУТ СПРОСИТЬ (было в лабе)
+---------------------------------------------------------------------
+root_squash vs all_squash:
+  root_squash - только root клиента -> nobody (65534). Обычные UID как есть.
+  all_squash,anonuid=1000,anongid=1000 - ВСЕ пользователи клиента -> UID 1000.
+  Проверка: создать файлы от разных пользователей на клиенте и на сервере
+  посмотреть  ls -ln /srv/nfs/shared/   (-n - числа вместо имён).
+Почему chown/chmod на клиенте не работают: права проверяет СЕРВЕР, а root
+  клиента там превращён в nobody.
+Минусы rsync+inotifywait: только в одну сторону, конфликты не решает,
+  пропущенные пока служба лежала изменения сама не догонит (сделай ручной
+  sync-nfs.sh). Открытые файлы может скопировать "недописанными".
+
+
+---------------------------------------------------------------------
+ЧАСТЫЕ ОШИБКИ
+---------------------------------------------------------------------
+- Ключ SSH создан через sudo (у root), а служба от administrator -> нет доступа.
+- Нет User=administrator в службе -> "Host key verification failed".
+- Забыл chmod +x на скрипты.
+- Поменял /etc/exports и не сделал exportfs -ra.
+- В auto.master не "/-" -> карта читается как косвенная, пути не те.
+- Клиент "завис" после остановки A -> umount -l /mnt/nfs/shared.
+- NFS не стартует на Astra -> Requires/After=rpcbind.service + daemon-reload.

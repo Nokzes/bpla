@@ -1,59 +1,213 @@
-Билет № 2. Пользователи и PAM — по ЛР
-«Управление учётными записями» (РЕД ОС)
-Все команды от root (sudo -i). Пункт про PAM в ваших лабах не
-встречался — он из общей методики, проверьте его заранее на
-ВМ.
-1. user1
-groupadd -g 1500 user1
-useradd -u 1500 -g user1 -G video -s /bin/bash -m user1
-passwd user1
-chage -M 60 user1 # пароль действует 60 дней
-passwd -e user1 # сменить пароль при первом входе
+=====================================================================
+БИЛЕТ № 2. Пользователи, группы и PAM (РЕД ОС)
+(по ЛР ОРСОС №3 «Управление учётными записями пользователей и групп»)
+=====================================================================
 
-id user1 # uid=1500 gid=1500 groups=1500(user1),39(video)
-chage -l user1 # "пароль должен быть изменён", максимум 60
-2. user2
-groupadd --gid 2000 user2
-useradd --gid 2000 --uid 2000 -m user2
-groupadd crontab # в РЕД ОС её нет: "группа crontab не существует"
-usermod -aG crontab user2
-usermod -c "Пользователь 2,111,111-111,," user2
+ЗАДАНИЕ ИЗ БИЛЕТА
+user1: UID 1500, основная группа user1 (GID 1500), доп. группа video,
+       домашний каталог, оболочка /bin/bash, пароль, срок пароля 60 дней,
+       смена пароля при первом входе.
+user2: UID 2000, основная группа user2 (GID 2000), доп. группа crontab,
+       GECOS: "Пользователь 2", комната 111, раб. телефон 111-111, остальное пусто,
+       пароль.
+PAM:   помнить 5 последних паролей (нельзя повторять);
+       root тоже НЕ может ставить пароли из словаря (те же правила, что у всех).
+
+Команды - от root (sudo -i).
+Первая часть (user1, user2) один в один из лабы. Части про PAM в лабе НЕ
+было - она написана по документации, прогони её заранее на ВМ.
+
+ГДЕ ЧТО ХРАНИТСЯ (могут спросить)
+  /etc/passwd   - пользователи: имя:x:UID:GID:GECOS:домашний_каталог:оболочка
+  /etc/shadow   - хэши паролей и сроки их действия (то, что меняет chage)
+  /etc/group    - группы и их участники
+  /etc/gshadow  - пароли групп
+  /etc/login.defs, /etc/default/useradd - значения по умолчанию для useradd
+  /etc/pam.d/*  - правила PAM (как проверять/менять пароли)
+  /etc/security/pwquality.conf - правила сложности пароля
+  /etc/security/opasswd        - СТАРЫЕ пароли (для истории, pam_pwhistory)
+
+
+---------------------------------------------------------------------
+ЧАСТЬ 1. user1
+---------------------------------------------------------------------
+groupadd -g 1500 user1
+#  ЗАЧЕМ сначала группа: если её не создать, useradd сам сделает группу
+#  user1, но с ПЕРВЫМ СВОБОДНЫМ номером, а не 1500.
+#  -g - номер группы (GID).
+
+useradd -u 1500 -g user1 -G video -s /bin/bash -m user1
+#  -u 1500     UID пользователя
+#  -g user1    ОСНОВНАЯ группа
+#  -G video    ДОПОЛНИТЕЛЬНАЯ группа (video - доступ к видеоустройствам)
+#  -s /bin/bash  оболочка входа
+#  -m          создать /home/user1 (скопировать шаблон из /etc/skel)
+
+passwd user1
+#  задаём пароль (ввести 2 раза)
+
+passwd -x 60 user1        # или то же самое:  chage -M 60 user1
+#  -x / -M 60 - максимальный срок действия пароля 60 дней.
+#  (в лабе было chage -M; в билете упомянут passwd - работают оба)
+
+passwd -e user1           # или:  chage -d 0 user1
+#  -e - сделать пароль просроченным -> при первом входе потребует новый.
+
+# ПРОВЕРКА
+id user1
+#  uid=1500(user1) gid=1500(user1) группы=1500(user1),39(video)
+chage -l user1
+#  "Последний раз пароль был изменён: пароль должен быть изменён"
+#  "Максимальное количество дней между сменами пароля: 60"
+
+
+---------------------------------------------------------------------
+ЧАСТЬ 2. user2
+---------------------------------------------------------------------
+groupadd -g 2000 user2
+#  основная группа с GID 2000
+
+getent group crontab || groupadd crontab
+#  ЗАЧЕМ: в РЕД ОС группы crontab НЕТ (в лабе была ошибка
+#  "группа crontab не существует"). Проверяем и создаём, если нет.
+
+useradd -u 2000 -g 2000 -G crontab -c "Пользователь 2,111,111-111,," -m user2
+#  -c - поле GECOS. Поля через запятую:
+#       полное имя , комната , рабочий телефон , домашний телефон , другое
+#       "Пользователь 2,111,111-111,,"  - последние два поля пустые.
+#  Кавычки нужны, потому что в имени есть пробел.
+
+#  (Как в лабе, по шагам - тоже правильно:
+#     useradd --gid 2000 --uid 2000 -m user2
+#     usermod -aG crontab user2      # -a = ДОБАВИТЬ к группам, без -a старые группы заменятся!
+#     usermod -c "Пользователь 2,111,111-111,," user2 )
+
 passwd user2
 
-lslogins user2 # UID 2000, группы user2, crontab; Gecos: Пользователь 2,111,111-111,,
+# ПРОВЕРКА
+lslogins user2
+#  UID 2000, Primary group user2 (2000), Supplementary groups crontab,
+#  Gecos field: Пользователь 2,111,111-111,,
 grep user2 /etc/passwd
-3. PAM: история 5 паролей + словарь и для root
+#  user2:x:2000:2000:Пользователь 2,111,111-111,,:/home/user2:/bin/bash
+id user2
+
+
+---------------------------------------------------------------------
+ЧАСТЬ 3. PAM - ДО настройки покажи, как было
+---------------------------------------------------------------------
+passwd user1      # ввести:  password
+#  Сейчас root получает "НЕУДАЧНЫЙ ПАРОЛЬ: ... словарное слово", НО пароль
+#  ВСЁ РАВНО МЕНЯЕТСЯ (в лабе так и было - root можно ставить слабые пароли).
+#  Это мы и будем запрещать. (Потом снова поставь user1 нормальный пароль.)
+
+
+---------------------------------------------------------------------
+ЧАСТЬ 4. PAM - НАСТРОЙКА
+---------------------------------------------------------------------
+КАК ЭТО УСТРОЕНО: команда passwd читает /etc/pam.d/passwd, а тот
+подключает /etc/pam.d/system-auth. В секции "password" модули идут по
+очереди:
+  pam_pwquality - проверка сложности (длина, словарь)
+  pam_pwhistory - проверка истории (не совпадает ли со старыми)
+  pam_unix      - собственно записывает новый хэш в /etc/shadow
+Опция enforce_for_root = правило действует и для root
+(по умолчанию root только предупреждают).
+
+СТРАХОВКА (обязательно!):
+cp -a /etc/pam.d/system-auth /etc/pam.d/system-auth.bak
+cp -a /etc/pam.d/password-auth /etc/pam.d/password-auth.bak
+#  и держи открытым ВТОРОЙ терминал под root - если сломаешь PAM,
+#  вернёшь копию оттуда.
+
 authselect current
-# если используется профиль:
+#  Смотрим, кто управляет файлами PAM. Дальше ОДИН из двух вариантов.
+
+------ ВАРИАНТ А: authselect показал профиль (например "sssd" / "minimal") ------
+ЗАЧЕМ так: если PAM ведёт authselect, ручные правки system-auth
+он перезапишет. Поэтому включаем функцию профиля и правим конфиги модулей.
+
 authselect enable-feature with-pwhistory
 authselect apply-changes
+#  в system-auth появится строка pam_pwhistory.so
 
 vim /etc/security/pwhistory.conf
-remember = 5
-enforce_for_root
+    remember = 5
+    enforce_for_root
+#  remember = 5      - помнить 5 последних паролей
+#  enforce_for_root  - история действует и на root
 
 vim /etc/security/pwquality.conf
-minlen = 8
-dictcheck = 1
-enforce_for_root
+    minlen = 8
+    dictcheck = 1
+    enforce_for_root
+#  dictcheck = 1     - проверка по словарю (cracklib)
+#  enforce_for_root  - root тоже ОТКАЗ, а не просто предупреждение
 
+------ ВАРИАНТ Б: "No existing configuration detected" (authselect не используется) ------
+Правим секцию password руками в ОБОИХ файлах:
+vim /etc/pam.d/system-auth
+vim /etc/pam.d/password-auth
+
+password    requisite     pam_pwquality.so try_first_pass local_users_only retry=3 enforce_for_root
+password    requisite     pam_pwhistory.so remember=5 use_authtok enforce_for_root
+password    sufficient    pam_unix.so sha512 shadow try_first_pass use_authtok
+password    required      pam_deny.so
+
+#  requisite  - если модуль сказал "нет", дальше не идём, пароль не меняется
+#  sufficient - если pam_unix записал пароль, на этом успех
+#  use_authtok - взять пароль, который уже ввели выше (не спрашивать второй раз)
+#  ПОРЯДОК ВАЖЕН: pwquality и pwhistory должны стоять ДО pam_unix.
+#  Строку pwhistory вставляем, если её нет; в строку pwquality дописываем
+#  enforce_for_root. Остальные строки секции оставь как были.
+
+# ПРОВЕРКА, что модули на месте
 grep -E "pwquality|pwhistory" /etc/pam.d/system-auth
-Если authselect не настроен («No existing configuration detected») —
-секция password в /etc/pam.d/system-auth и password-auth:
-password requisite pam_pwquality.so try_first_pass local_users_only retry=3 enforce_for_root
-password requisite pam_pwhistory.so remember=5 use_authtok enforce_for_root
-password sufficient pam_unix.so sha512 shadow try_first_pass use_authtok remember=5
-password required pam_deny.so
-4. Проверки
-# история паролей
+#  (если /etc/security/pwhistory.conf в системе нет - пиши параметры
+#   прямо в строку pam_pwhistory.so, как в варианте Б)
+
+
+---------------------------------------------------------------------
+ЧАСТЬ 5. ПРОВЕРКИ
+---------------------------------------------------------------------
+--- 5.1 История паролей (5 последних) ---
 su - user2
-passwd # сменить несколько раз: Pass#A2026 -> Pass#B2026 -> Pass#C2026
-passwd # ввести старый -> "Password has been already used. Choose another."
+passwd
+#  меняем пароль несколько раз, каждый раз НОВЫЙ сложный, например:
+#  Kot#Lisa2026  ->  Sova!Mars77  ->  Tigr$Luna31
+passwd
+#  вводим один из прошлых (Kot#Lisa2026):
+#  "Password has been already used. Choose another."  -> пароль НЕ меняется
 exit
 cat /etc/security/opasswd
+#  тут лежат хэши старых паролей user2 - по ним и идёт сравнение
 
-# root и словарь (раньше в ЛР root мог ставить слабый пароль — теперь нет)
-passwd user1 # ввести password -> BAD PASSWORD: ... dictionary check, пароль НЕ меняется
-passwd user1 # ввести qwerty123 -> тоже отказ
-passwd # собственный пароль root — те же правила
-echo "password" | pwscore
+--- 5.2 Root и словарь ---
+passwd user1      # ввести:  password
+#  BAD PASSWORD: The password fails the dictionary check ...
+#  и пароль НЕ меняется (в конце "Ошибка при операциях с маркером проверки подлинности")
+passwd user1      # ввести:  qwerty123   -> тоже отказ
+passwd user1      # ввести короткий (abc) -> отказ по длине
+#  СРАВНИ с частью 3: раньше root мог, теперь нет -> те же правила, что у всех.
+
+pwscore <<< "password"
+#  наглядно: оценка/ошибка словаря для пароля
+
+--- 5.3 Root и история ---
+#  passwd user2 от root старым паролем user2 -> тоже "already used"
+#  (потому что enforce_for_root у pam_pwhistory)
+
+
+---------------------------------------------------------------------
+ЕСЛИ ЧТО-ТО СЛОМАЛОСЬ
+---------------------------------------------------------------------
+cp -a /etc/pam.d/system-auth.bak /etc/pam.d/system-auth
+cp -a /etc/pam.d/password-auth.bak /etc/pam.d/password-auth
+#  при authselect:  authselect disable-feature with-pwhistory; authselect apply-changes
+
+ЧАСТЫЕ ОШИБКИ
+- usermod -G без -a -> пользователь вылетел из всех прежних доп. групп.
+- Не создал группу crontab -> useradd/usermod ругается.
+- Создал user1 без groupadd -g 1500 -> GID получился не 1500.
+- Правил system-auth руками при включённом authselect -> правки слетели.
+- Забыл enforce_for_root -> root по-прежнему только предупреждают.
